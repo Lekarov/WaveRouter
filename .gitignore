@@ -1,0 +1,21 @@
+# Environnement virtuel Python
+.venv/
+venv/
+
+# Fichiers compilés Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build PyInstaller
+build/
+dist/
+*.spec
+
+# Outil tiers non redistribuable (voir README) : à télécharger séparément
+SoundVolumeView.exe
+
+# Fichiers de config/éditeur
+.vscode/
+.idea/
+*.log

@@ -1,0 +1,9 @@
+# Dépendances runtime de WaveRouter
+customtkinter>=5.2.2
+psutil>=5.9.8
+pystray>=0.19.5
+Pillow>=10.3.0
+plyer>=2.1.0
+
+# Dépendance de build (packaging en .exe autonome), non nécessaire à l'exécution
+pyinstaller>=6.6.0
