@@ -19,3 +19,9 @@ SoundVolumeView.exe
 .vscode/
 .idea/
 *.log
+
+# Cache des outils de test
+.pytest_cache/
+
+# Notes de dev locales, jamais publiées
+CLAUDE.md

@@ -1,97 +1,89 @@
 """
-Icône dans la barre des tâches (system tray) : ouvrir la fenêtre, mettre la
-surveillance en pause, quitter l'application. Génère son icône par code
-(pas de fichier .ico requis) via Pillow.
+Icône de la barre système : ouvrir la fenêtre, mettre la surveillance en
+pause, quitter l'application.
+
+Qt fournit nativement l'icône et les notifications, là où la version 1
+devait combiner deux bibliothèques externes : pystray, avec sa propre
+boucle d'événements dans un thread séparé, et plyer, qui écrivait une
+icône temporaire sur le disque à chaque notification. Tout se déroule
+désormais sur la boucle Qt, sans thread ni fichier intermédiaire.
 """
 
 from __future__ import annotations
 
-import threading
 from typing import Callable
 
-import pystray
-from PIL import Image, ImageDraw
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
-try:
-    from plyer import notification as plyer_notification
-except ImportError:  # plyer optionnel si les notifications sont désactivées
-    plyer_notification = None
-
-
-def _build_icon_image() -> Image.Image:
-    """Dessine une icône simple (onde stylisée) pour la barre système."""
-    size = 64
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.ellipse((2, 2, size - 2, size - 2), fill=(124, 92, 255, 255))  # theme.ACCENT (#7C5CFF)
-    # Trois barres façon égaliseur audio, pour évoquer le routage audio
-    bars = [(18, 34, 26, 46), (30, 20, 38, 46), (42, 28, 50, 46)]
-    for x0, y0, x1, y1 in bars:
-        draw.rounded_rectangle((x0, y0, x1, y1), radius=2, fill=(255, 255, 255, 255))
-    return img
+from waverouter.ui import theme
+from waverouter.ui.widgets import app_icon
 
 
 class TrayIcon:
-    """Enveloppe pystray.Icon avec les actions spécifiques à WaveRouter."""
+    """Enveloppe QSystemTrayIcon avec les actions propres à WaveRouter."""
 
     def __init__(
         self,
+        parent,
         on_open: Callable[[], None],
-        on_toggle_pause: Callable[[], bool],
+        on_toggle_pause: Callable[[], None],
+        is_paused: Callable[[], bool],
         on_quit: Callable[[], None],
     ) -> None:
+        # L'état de pause est toujours lu à la source plutôt que recopié :
+        # la bascule peut venir de la fenêtre comme du menu, et une copie
+        # locale finit systématiquement désynchronisée de l'une des deux.
+        self._is_paused = is_paused
         self._on_open = on_open
-        self._on_toggle_pause = on_toggle_pause
-        self._on_quit = on_quit
 
-        self._icon = pystray.Icon(
-            "WaveRouter",
-            icon=_build_icon_image(),
-            title="WaveRouter",
-            menu=pystray.Menu(
-                pystray.MenuItem("Ouvrir", self._handle_open, default=True),
-                pystray.MenuItem(
-                    "Pause surveillance", self._handle_toggle_pause, checked=self._is_paused
-                ),
-                pystray.MenuItem("Quitter", self._handle_quit),
-            ),
+        self._icon = QSystemTrayIcon(app_icon(), parent)
+        self._icon.setToolTip("WaveRouter")
+
+        menu = QMenu(parent)
+        menu.setStyleSheet(theme.stylesheet())
+
+        self._open_action = QAction("Ouvrir", parent)
+        self._open_action.triggered.connect(lambda: on_open())
+        menu.addAction(self._open_action)
+
+        self._pause_action = QAction("Pause surveillance", parent)
+        self._pause_action.setCheckable(True)
+        self._pause_action.triggered.connect(lambda: (on_toggle_pause(), self.update_menu()))
+        menu.addAction(self._pause_action)
+
+        menu.addSeparator()
+
+        quit_action = QAction("Quitter", parent)
+        quit_action.triggered.connect(lambda: on_quit())
+        menu.addAction(quit_action)
+
+        self._icon.setContextMenu(menu)
+        self._icon.activated.connect(self._on_activated)
+        self.update_menu()
+
+    def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._on_open()
+
+    def show(self) -> None:
+        self._icon.show()
+
+    def hide(self) -> None:
+        self._icon.hide()
+
+    def update_menu(self) -> None:
+        """Aligne la coche du menu sur l'état réel de la surveillance."""
+        paused = self._is_paused()
+        self._pause_action.setChecked(paused)
+        self._icon.setToolTip(
+            "WaveRouter — surveillance en pause" if paused else "WaveRouter — surveillance active"
         )
-        self._paused = False
-        self._thread: threading.Thread | None = None
 
-    def _is_paused(self, _item: pystray.MenuItem) -> bool:
-        return self._paused
-
-    def _handle_open(self, _icon=None, _item=None) -> None:
-        self._on_open()
-
-    def _handle_toggle_pause(self, _icon=None, _item=None) -> None:
-        self._paused = self._on_toggle_pause()
-        self._icon.update_menu()
-
-    def _handle_quit(self, _icon=None, _item=None) -> None:
-        self._on_quit()
-        self._icon.stop()
-
-    def run_detached(self) -> None:
-        """Démarre la boucle pystray dans un thread dédié (non bloquant)."""
-        self._thread = threading.Thread(target=self._icon.run, daemon=True, name="WaveRouterTray")
-        self._thread.start()
-
-    def stop(self) -> None:
+    def notify(self, title: str, message: str) -> None:
+        """Affiche une notification native Windows (best-effort)."""
         try:
-            self._icon.stop()
-        except Exception:
-            pass
-
-    @staticmethod
-    def notify(title: str, message: str) -> None:
-        """Affiche une notification toast discrète (best-effort)."""
-        if plyer_notification is None:
-            return
-        try:
-            plyer_notification.notify(
-                title=title, message=message, app_name="WaveRouter", timeout=4
-            )
+            if QSystemTrayIcon.supportsMessages():
+                self._icon.showMessage(title, message, app_icon(), 4000)
         except Exception:
             pass  # Les notifications sont un confort, jamais bloquantes

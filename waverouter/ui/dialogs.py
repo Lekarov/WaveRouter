@@ -1,290 +1,504 @@
 """
-Boîtes de dialogue de l'interface : ajout/édition d'un jeu.
+Boîtes de dialogue : ajout et édition d'un jeu, détection d'une application
+en cours, import de la bibliothèque installée, proposition d'un jeu
+nouvellement détecté.
+
+Les listes s'appuient sur QTreeWidget, qui suit la feuille de style de
+l'application. La version 1 devait recourir à un ttk.Treeview au thème
+bricolé, visiblement étranger au reste de l'interface.
 """
 
 from __future__ import annotations
 
 import os
-from tkinter import filedialog, ttk
+import threading
 from typing import Callable
 
-import customtkinter as ctk
+from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QHeaderView,
+    QLineEdit,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from waverouter.config import GameEntry
+from waverouter.game_library import InstalledGame, scan_installed_games
 from waverouter.ui import theme
+from waverouter.ui.widgets import Card, button, label
 from waverouter.window_processes import DetectedWindow, list_visible_app_processes
 
+_NO_CHANNEL_PLACEHOLDER = "(aucun périphérique détecté)"
 
-class GameDialog(ctk.CTkToplevel):
-    """Fenêtre modale pour ajouter ou modifier un jeu de la liste."""
+
+def _channel_combo(channels: list[str]) -> QComboBox:
+    combo = QComboBox()
+    combo.setEditable(True)  # un canal Wave Link peut être saisi à la main
+    combo.addItems(channels or [_NO_CHANNEL_PLACEHOLDER])
+    combo.setMinimumHeight(34)
+    return combo
+
+
+def _field(parent_layout: QVBoxLayout, text: str, widget: QWidget) -> QWidget:
+    parent_layout.addWidget(label(text, "small"))
+    parent_layout.addWidget(widget)
+    return widget
+
+
+class _BaseDialog(QDialog):
+    """Fenêtre modale au thème de l'application."""
+
+    def __init__(self, parent, title: str, width: int, height: int) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.resize(width, height)
+        self.setStyleSheet(theme.stylesheet())
+
+        self._root = QVBoxLayout(self)
+        self._root.setContentsMargins(24, 24, 24, 24)
+        self._root.setSpacing(14)
+
+    def add_title(self, title: str, subtitle: str = "") -> None:
+        self._root.addWidget(label(title, "h2"))
+        if subtitle:
+            sub = label(subtitle, "body")
+            sub.setWordWrap(True)
+            self._root.addWidget(sub)
+
+
+class GameDialog(_BaseDialog):
+    """Ajout ou modification d'un jeu de la liste."""
 
     def __init__(
         self,
-        master,
+        parent,
         channels: list[str],
         on_confirm: Callable[[GameEntry], None],
         existing: GameEntry | None = None,
+        is_duplicate: Callable[[str], bool] | None = None,
     ) -> None:
-        super().__init__(master)
-        self.title("Modifier un jeu" if existing else "Ajouter un jeu")
-        self.geometry("460x440")
-        self.resizable(False, False)
-        self.configure(fg_color=theme.BG_APP)
-        self.transient(master)
-        self.grab_set()
-
+        super().__init__(
+            parent, "Modifier un jeu" if existing else "Ajouter un jeu", 480, 460
+        )
         self._on_confirm = on_confirm
+        self._is_duplicate = is_duplicate
         self._exe_path = existing.exe_path if existing else ""
 
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=20, pady=20)
+        self.add_title("Modifier un jeu" if existing else "Ajouter un jeu")
 
-        ctk.CTkLabel(
-            body,
-            text="Modifier un jeu" if existing else "Ajouter un jeu",
-            font=theme.FONT_H2,
-            text_color=theme.TEXT_PRIMARY,
-        ).pack(anchor="w", pady=(0, 16))
+        exe_row = QHBoxLayout()
+        exe_row.setSpacing(8)
+        self.process_edit = QLineEdit()
+        self.process_edit.setPlaceholderText("jeu.exe")
+        self.process_edit.setMinimumHeight(34)
+        exe_row.addWidget(self.process_edit, 1)
+        exe_row.addWidget(button("Parcourir...", "", self._browse_exe))
+        self._root.addWidget(label("Exécutable du jeu (.exe)", "small"))
+        self._root.addLayout(exe_row)
 
-        # --- Sélection de l'exécutable ---
-        self._field_label(body, "Exécutable du jeu (.exe)")
-        exe_frame = ctk.CTkFrame(body, fg_color="transparent")
-        exe_frame.pack(fill="x")
-        self.process_entry = self._entry(exe_frame, placeholder="jeu.exe")
-        self.process_entry.pack(side="left", fill="x", expand=True)
-        self._secondary_button(exe_frame, "Parcourir...", self._browse_exe, width=100).pack(
-            side="left", padx=(8, 0)
-        )
+        self.label_edit = QLineEdit()
+        self.label_edit.setPlaceholderText("Ex: Hunt: Showdown")
+        self.label_edit.setMinimumHeight(34)
+        _field(self._root, "Nom du jeu (libellé)", self.label_edit)
 
-        # --- Libellé libre ---
-        self._field_label(body, "Nom du jeu (libellé)", pady_top=16)
-        self.label_entry = self._entry(body, placeholder="Ex: Hunt: Showdown")
-        self.label_entry.pack(fill="x")
+        self.channel_combo = _channel_combo(channels)
+        _field(self._root, "Canal audio cible", self.channel_combo)
 
-        # --- Canal audio cible ---
-        self._field_label(body, "Canal audio cible", pady_top=16)
-        self.channel_combo = ctk.CTkComboBox(
-            body,
-            values=channels or ["(aucun périphérique détecté)"],
-            fg_color=theme.BG_INPUT,
-            border_color=theme.BORDER,
-            button_color=theme.BG_CARD_ALT,
-            button_hover_color=theme.BG_CARD_HOVER,
-            dropdown_fg_color=theme.BG_CARD,
-            corner_radius=theme.RADIUS_INPUT,
-        )
-        self.channel_combo.pack(fill="x")
-        if channels:
-            self.channel_combo.set(channels[0])
+        self.enabled_check = QCheckBox("Surveiller ce jeu")
+        self.enabled_check.setChecked(existing.enabled if existing else True)
+        self._root.addWidget(self.enabled_check)
 
         if existing:
-            self.process_entry.insert(0, existing.process_name)
-            self.label_entry.insert(0, existing.label)
+            self.process_edit.setText(existing.process_name)
+            self.label_edit.setText(existing.label)
             if existing.channel:
-                self.channel_combo.set(existing.channel)
+                self.channel_combo.setCurrentText(existing.channel)
 
-        self.error_label = ctk.CTkLabel(body, text="", font=theme.FONT_SMALL, text_color=theme.DANGER)
-        self.error_label.pack(anchor="w", pady=(12, 0))
+        self.error_label = label("", "danger")
+        self.error_label.setWordWrap(True)
+        self._root.addWidget(self.error_label)
+        self._root.addStretch(1)
 
-        # --- Boutons ---
-        btn_frame = ctk.CTkFrame(body, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(16, 0), side="bottom")
-        ctk.CTkButton(
-            btn_frame,
-            text="Valider",
-            font=theme.FONT_BODY_BOLD,
-            fg_color=theme.ACCENT,
-            hover_color=theme.ACCENT_HOVER,
-            corner_radius=theme.RADIUS_BUTTON,
-            command=self._confirm,
-        ).pack(side="right")
-        self._secondary_button(btn_frame, "Annuler", self.destroy).pack(side="right", padx=(0, 8))
-
-    # -- petits helpers de style, partagés avec QuickAddDialog ------------
-    @staticmethod
-    def _field_label(parent, text: str, pady_top: int = 0) -> None:
-        ctk.CTkLabel(parent, text=text, font=theme.FONT_SMALL_BOLD, text_color=theme.TEXT_SECONDARY).pack(
-            anchor="w", pady=(pady_top, 4)
-        )
-
-    @staticmethod
-    def _entry(parent, placeholder: str = "") -> ctk.CTkEntry:
-        return ctk.CTkEntry(
-            parent,
-            placeholder_text=placeholder,
-            fg_color=theme.BG_INPUT,
-            border_color=theme.BORDER,
-            corner_radius=theme.RADIUS_INPUT,
-        )
-
-    @staticmethod
-    def _secondary_button(parent, text: str, command, width: int | None = None) -> ctk.CTkButton:
-        kwargs = {"width": width} if width else {}
-        return ctk.CTkButton(
-            parent,
-            text=text,
-            font=theme.FONT_BODY,
-            fg_color=theme.BG_CARD_ALT,
-            hover_color=theme.BG_CARD_HOVER,
-            text_color=theme.TEXT_PRIMARY,
-            corner_radius=theme.RADIUS_BUTTON,
-            command=command,
-            **kwargs,
-        )
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        actions.addWidget(button("Annuler", "", self.reject))
+        actions.addWidget(button("Valider", "primary", self._confirm))
+        self._root.addLayout(actions)
 
     def _browse_exe(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Sélectionner l'exécutable du jeu",
-            filetypes=[("Exécutables", "*.exe"), ("Tous les fichiers", "*.*")],
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Sélectionner l'exécutable du jeu", "", "Exécutables (*.exe);;Tous les fichiers (*)"
         )
         if not path:
             return
         process_name = os.path.basename(path)
-        self.process_entry.delete(0, "end")
-        self.process_entry.insert(0, process_name)
-        self._exe_path = path
-        if not self.label_entry.get().strip():
+        self.process_edit.setText(process_name)
+        self._exe_path = os.path.normpath(path)
+        if not self.label_edit.text().strip():
             # Propose un libellé par défaut à partir du nom de fichier
-            guessed_label = os.path.splitext(process_name)[0]
-            self.label_entry.insert(0, guessed_label)
+            self.label_edit.setText(os.path.splitext(process_name)[0])
 
     def _confirm(self) -> None:
-        process_name = self.process_entry.get().strip()
-        label = self.label_entry.get().strip()
-        channel = self.channel_combo.get().strip()
+        process_name = self.process_edit.text().strip()
+        game_label = self.label_edit.text().strip()
+        channel = self.channel_combo.currentText().strip()
 
         if not process_name:
-            self.error_label.configure(text="Le nom du processus est requis.")
+            self.error_label.setText("Le nom du processus est requis.")
             return
-        if not label:
-            self.error_label.configure(text="Le libellé du jeu est requis.")
+        if not process_name.lower().endswith(".exe"):
+            self.error_label.setText(
+                "Le nom du processus doit se terminer par .exe (ex: jeu.exe)."
+            )
             return
-        if not channel or channel == "(aucun périphérique détecté)":
-            self.error_label.configure(text="Sélectionnez un canal audio valide.")
+        if not game_label:
+            self.error_label.setText("Le libellé du jeu est requis.")
+            return
+        if not channel or channel == _NO_CHANNEL_PLACEHOLDER:
+            self.error_label.setText("Sélectionnez un canal audio valide.")
+            return
+        if self._is_duplicate and self._is_duplicate(process_name):
+            self.error_label.setText(
+                f"{process_name} est déjà surveillé. Modifiez l'entrée existante."
+            )
             return
 
-        # Le chemin choisi (via Parcourir ou détection) sert uniquement à
-        # afficher l'icône : on le garde même si le libellé du processus a
-        # ensuite été corrigé à la main (fréquent avec les jeux Unreal, où
-        # l'exécutable repéré et le process réel surveillé peuvent différer).
+        # Le chemin choisi sert uniquement à afficher l'icône : on le garde
+        # même si le nom du processus a ensuite été corrigé à la main, cas
+        # fréquent avec les jeux Unreal dont le lanceur et le processus réel
+        # portent des noms différents.
         self._on_confirm(
             GameEntry(
-                label=label, process_name=process_name, channel=channel, exe_path=self._exe_path
+                label=game_label,
+                process_name=process_name,
+                channel=channel,
+                exe_path=self._exe_path,
+                enabled=self.enabled_check.isChecked(),
             )
         )
-        self.destroy()
+        self.accept()
 
 
-class QuickAddDialog(ctk.CTkToplevel):
-    """
-    Fenêtre modale listant les applications actuellement ouvertes
-    (fenêtres visibles), pour ajouter un jeu sans avoir à parcourir
-    manuellement son chemin d'exécutable.
-    """
+class QuickAddDialog(_BaseDialog):
+    """Liste les applications ayant une fenêtre visible, pour un ajout rapide."""
 
     def __init__(
         self,
-        master,
+        parent,
         channels: list[str],
         on_confirm: Callable[[GameEntry], None],
+        is_duplicate: Callable[[str], bool] | None = None,
     ) -> None:
-        super().__init__(master)
-        self.title("Détecter un jeu en cours")
-        self.geometry("540x460")
-        self.resizable(False, False)
-        self.configure(fg_color=theme.BG_APP)
-        self.transient(master)
-        self.grab_set()
-
+        super().__init__(parent, "Détecter un jeu en cours", 620, 520)
         self._channels = channels
         self._on_confirm = on_confirm
+        self._is_duplicate = is_duplicate
         self._detected: list[DetectedWindow] = []
 
-        theme.style_treeview_dark()
-
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=20, pady=20)
-
-        ctk.CTkLabel(
-            body, text="Détecter un jeu en cours", font=theme.FONT_H2, text_color=theme.TEXT_PRIMARY
-        ).pack(anchor="w", pady=(0, 4))
-        ctk.CTkLabel(
-            body,
-            text="Sélectionnez l'application à ajouter parmi celles actuellement ouvertes.",
-            font=theme.FONT_BODY,
-            text_color=theme.TEXT_SECONDARY,
-        ).pack(anchor="w", pady=(0, 16))
-
-        # Les widgets ancrés en bas doivent être empaquetés AVANT le
-        # Treeview : avec pack(), le premier widget à demander expand=True
-        # capte tout l'espace restant, quel que soit son `side` — s'il est
-        # empaqueté en premier, les boutons placés après lui n'ont plus de
-        # place et deviennent invisibles.
-        btn_frame = ctk.CTkFrame(body, fg_color="transparent")
-        btn_frame.pack(fill="x", pady=(12, 0), side="bottom")
-        ctk.CTkButton(
-            btn_frame,
-            text="Utiliser ce jeu",
-            font=theme.FONT_BODY_BOLD,
-            fg_color=theme.ACCENT,
-            hover_color=theme.ACCENT_HOVER,
-            corner_radius=theme.RADIUS_BUTTON,
-            command=self._confirm,
-        ).pack(side="right")
-        GameDialog._secondary_button(btn_frame, "Annuler", self.destroy).pack(
-            side="right", padx=(0, 8)
+        self.add_title(
+            "Détecter un jeu en cours",
+            "Sélectionnez l'application à ajouter parmi celles actuellement ouvertes.",
         )
-        GameDialog._secondary_button(btn_frame, "Actualiser", self._refresh).pack(side="left")
 
-        self.status_label = ctk.CTkLabel(
-            body, text="", font=theme.FONT_SMALL, text_color=theme.TEXT_MUTED
-        )
-        self.status_label.pack(anchor="w", pady=(8, 0), side="bottom")
+        card = Card(padding=(12, 12, 12, 12))
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Fenêtre", "Processus"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setAlternatingRowColors(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tree.itemDoubleClicked.connect(lambda *_: self._confirm())
+        card.body().addWidget(self.tree)
+        self._root.addWidget(card, 1)
 
-        tree_card = ctk.CTkFrame(body, fg_color=theme.BG_CARD, corner_radius=theme.RADIUS_CARD)
-        tree_card.pack(fill="both", expand=True)
+        self.status_label = label("", "muted")
+        self._root.addWidget(self.status_label)
 
-        columns = ("title", "process")
-        self.tree = ttk.Treeview(
-            tree_card, columns=columns, show="headings", style="WaveRouter.Treeview"
-        )
-        self.tree.heading("title", text="Fenêtre")
-        self.tree.heading("process", text="Processus")
-        self.tree.column("title", width=300)
-        self.tree.column("process", width=180)
-        self.tree.pack(fill="both", expand=True, padx=8, pady=8)
-        self.tree.bind("<Double-1>", lambda _event: self._confirm())
+        actions = QHBoxLayout()
+        actions.addWidget(button("Actualiser", "", self._refresh))
+        actions.addStretch(1)
+        actions.addWidget(button("Annuler", "", self.reject))
+        actions.addWidget(button("Utiliser ce jeu", "primary", self._confirm))
+        self._root.addLayout(actions)
 
         self._refresh()
 
     def _refresh(self) -> None:
         self._detected = list_visible_app_processes()
-        self.tree.delete(*self.tree.get_children())
-        for index, window in enumerate(self._detected):
-            self.tree.insert("", "end", iid=str(index), values=(window.title, window.process_name))
-        if not self._detected:
-            self.status_label.configure(
-                text="Aucune fenêtre détectée. Lancez le jeu puis cliquez sur Actualiser."
-            )
+        self.tree.clear()
+        for window in self._detected:
+            QTreeWidgetItem(self.tree, [window.title, window.process_name])
+        if self._detected:
+            self.status_label.setText(f"{len(self._detected)} application(s) détectée(s).")
         else:
-            self.status_label.configure(text=f"{len(self._detected)} application(s) détectée(s).")
+            self.status_label.setText(
+                "Aucune fenêtre détectée. Lancez le jeu puis cliquez sur Actualiser."
+            )
 
     def _confirm(self) -> None:
-        selection = self.tree.selection()
-        if not selection:
-            self.status_label.configure(text="Sélectionnez une application dans la liste.")
+        index = self.tree.indexOfTopLevelItem(self.tree.currentItem())
+        if index < 0:
+            self.status_label.setText("Sélectionnez une application dans la liste.")
             return
-        window = self._detected[int(selection[0])]
-        parent = self.master
-        self.destroy()
+        window = self._detected[index]
+        self.accept()
         GameDialog(
-            parent,
+            self.parent(),
             channels=self._channels,
             on_confirm=self._on_confirm,
+            is_duplicate=self._is_duplicate,
             existing=GameEntry(
                 label=window.title,
                 process_name=window.process_name,
                 channel="",
                 exe_path=window.exe_path,
             ),
+        ).exec()
+
+
+class _ScanSignals(QObject):
+    """Passerelle du thread de balayage vers le thread de l'interface."""
+
+    done = Signal(list)
+    failed = Signal(str)
+
+
+class LibraryDialog(_BaseDialog):
+    """
+    Import des jeux installés : Steam, Epic Games, GOG, et dossiers ajoutés
+    à la main pour les jeux qu'aucun launcher ne référence.
+
+    Le balayage touche le disque, il tourne donc dans un thread dédié et
+    remonte son résultat par signal Qt, qui bascule automatiquement sur le
+    thread de l'interface.
+    """
+
+    def __init__(
+        self,
+        parent,
+        channels: list[str],
+        on_import: Callable[[list[GameEntry]], None],
+        is_duplicate: Callable[[str], bool],
+        folders: list[str] | None = None,
+        on_add_folder: Callable[[str], bool] | None = None,
+    ) -> None:
+        super().__init__(parent, "Importer mes jeux installés", 760, 600)
+        self._channels = channels
+        self._on_import = on_import
+        self._is_duplicate = is_duplicate
+        self._folders = list(folders or [])
+        self._on_add_folder = on_add_folder
+        self._games: list[InstalledGame] = []
+
+        self._signals = _ScanSignals()
+        self._signals.done.connect(self._populate)
+        self._signals.failed.connect(self._scan_failed)
+
+        self.add_title(
+            "Importer mes jeux installés",
+            "Jeux trouvés dans vos bibliothèques Steam, Epic Games et GOG. "
+            "Ajoutez un dossier pour les jeux installés à la main.",
         )
+
+        card = Card(padding=(12, 12, 12, 12))
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Jeu", "Source", "Processus surveillé"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tree.header().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        card.body().addWidget(self.tree)
+        self._root.addWidget(card, 1)
+
+        self.folders_label = label("", "muted")
+        self.folders_label.setWordWrap(True)
+        self._root.addWidget(self.folders_label)
+
+        channel_row = QHBoxLayout()
+        channel_row.addWidget(label("Canal cible :", "body"))
+        self.channel_combo = _channel_combo(channels)
+        self.channel_combo.setMinimumWidth(240)
+        channel_row.addWidget(self.channel_combo)
+        channel_row.addStretch(1)
+        self.status_label = label("Analyse des bibliothèques en cours...", "muted")
+        channel_row.addWidget(self.status_label)
+        self._root.addLayout(channel_row)
+
+        actions = QHBoxLayout()
+        actions.addWidget(button("Ajouter un dossier...", "", self._add_folder))
+        actions.addWidget(button("Tout sélectionner", "", self.tree.selectAll))
+        actions.addStretch(1)
+        actions.addWidget(button("Fermer", "", self.reject))
+        actions.addWidget(button("Importer la sélection", "primary", self._confirm))
+        self._root.addLayout(actions)
+
+        self._refresh_folders_label()
+        self._start_scan()
+
+    def _refresh_folders_label(self) -> None:
+        if self._folders:
+            self.folders_label.setText("Dossiers suivis : " + "   ".join(self._folders))
+        else:
+            self.folders_label.setText(
+                "Aucun dossier personnalisé. Utilisez « Ajouter un dossier... » "
+                "pour vos jeux hors launcher."
+            )
+
+    def _add_folder(self) -> None:
+        folder = QFileDialog.getExistingDirectory(
+            self, "Sélectionner un dossier contenant vos jeux"
+        )
+        if not folder:
+            return
+        folder = os.path.normpath(folder)
+        if self._on_add_folder and not self._on_add_folder(folder):
+            self.status_label.setText("Ce dossier est déjà suivi.")
+            return
+        self._folders.append(folder)
+        self._refresh_folders_label()
+        self._start_scan()
+
+    def _start_scan(self) -> None:
+        self.status_label.setText("Analyse des bibliothèques en cours...")
+        folders = list(self._folders)
+
+        def work() -> None:
+            try:
+                games = scan_installed_games(extra_folders=folders)
+            except Exception as exc:
+                self._signals.failed.emit(str(exc))
+                return
+            self._signals.done.emit(games)
+
+        threading.Thread(target=work, daemon=True, name="WaveRouterLibraryScan").start()
+
+    def _scan_failed(self, message: str) -> None:
+        self.status_label.setText(f"Analyse impossible : {message}")
+
+    def _populate(self, games: list) -> None:
+        self._games = games
+        self.tree.clear()
+        for game in games:
+            already = self._is_duplicate(game.process_name)
+            item = QTreeWidgetItem(
+                self.tree,
+                [
+                    game.name + ("   (déjà surveillé)" if already else ""),
+                    game.source,
+                    game.process_name,
+                ],
+            )
+            if already:
+                item.setForeground(0, Qt.gray)
+        if games:
+            self.status_label.setText(f"{len(games)} jeu(x) détecté(s).")
+        else:
+            self.status_label.setText(
+                "Aucun jeu détecté. Ajoutez un dossier ou saisissez le jeu à la main."
+            )
+
+    def _confirm(self) -> None:
+        selection = self.tree.selectedItems()
+        if not selection:
+            self.status_label.setText("Sélectionnez au moins un jeu dans la liste.")
+            return
+        channel = self.channel_combo.currentText().strip()
+        if not channel or channel == _NO_CHANNEL_PLACEHOLDER:
+            self.status_label.setText("Sélectionnez un canal audio valide.")
+            return
+
+        entries: list[GameEntry] = []
+        for item in selection:
+            game = self._games[self.tree.indexOfTopLevelItem(item)]
+            if self._is_duplicate(game.process_name):
+                continue
+            entries.append(
+                GameEntry(
+                    label=game.name,
+                    process_name=game.process_name,
+                    channel=channel,
+                    exe_path=game.exe_path,
+                )
+            )
+        if not entries:
+            self.status_label.setText("Ces jeux sont déjà tous surveillés.")
+            return
+        self._on_import(entries)
+        self.accept()
+
+
+class NewGameDialog(_BaseDialog):
+    """
+    Proposition d'ajout d'un jeu repéré automatiquement par la surveillance.
+
+    Trois issues : l'ajouter, l'écarter définitivement, ou remettre à plus tard.
+    """
+
+    def __init__(
+        self,
+        parent,
+        process_name: str,
+        exe_path: str,
+        title: str,
+        channels: list[str],
+        on_add: Callable[[GameEntry], None],
+        on_ignore: Callable[[str], None],
+    ) -> None:
+        super().__init__(parent, "Nouveau jeu détecté", 480, 380)
+        self._process_name = process_name
+        self._exe_path = exe_path
+        self._on_add = on_add
+        self._on_ignore = on_ignore
+
+        self.add_title("Nouveau jeu détecté", f"{title}\n({process_name})")
+
+        self.label_edit = QLineEdit(title or os.path.splitext(process_name)[0])
+        self.label_edit.setMinimumHeight(34)
+        _field(self._root, "Nom du jeu (libellé)", self.label_edit)
+
+        self.channel_combo = _channel_combo(channels)
+        _field(self._root, "Canal audio cible", self.channel_combo)
+
+        self.error_label = label("", "danger")
+        self._root.addWidget(self.error_label)
+        self._root.addStretch(1)
+
+        actions = QHBoxLayout()
+        actions.addWidget(button("Ne plus proposer", "", self._ignore))
+        actions.addStretch(1)
+        actions.addWidget(button("Plus tard", "", self.reject))
+        actions.addWidget(button("Ajouter", "primary", self._confirm))
+        self._root.addLayout(actions)
+
+    def _confirm(self) -> None:
+        game_label = self.label_edit.text().strip()
+        channel = self.channel_combo.currentText().strip()
+        if not game_label:
+            self.error_label.setText("Le libellé du jeu est requis.")
+            return
+        if not channel or channel == _NO_CHANNEL_PLACEHOLDER:
+            self.error_label.setText("Sélectionnez un canal audio valide.")
+            return
+        self._on_add(
+            GameEntry(
+                label=game_label,
+                process_name=self._process_name,
+                channel=channel,
+                exe_path=self._exe_path,
+            )
+        )
+        self.accept()
+
+    def _ignore(self) -> None:
+        self._on_ignore(self._process_name)
+        self.reject()

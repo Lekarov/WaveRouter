@@ -1,9 +1,13 @@
-# Dépendances runtime de WaveRouter
-customtkinter>=5.2.2
+# Dépendances runtime de WaveRouter 2.0
+# Qt fournit nativement l'icône de barre système et les notifications :
+# pystray, plyer et customtkinter ne sont plus nécessaires.
+PySide6>=6.8.0
 psutil>=5.9.8
-pystray>=0.19.5
 Pillow>=10.3.0
-plyer>=2.1.0
 
 # Dépendance de build (packaging en .exe autonome), non nécessaire à l'exécution
 pyinstaller>=6.6.0
+
+# Dépendances de développement (tests et analyse statique)
+pytest>=8.0.0
+pyflakes>=3.2.0
