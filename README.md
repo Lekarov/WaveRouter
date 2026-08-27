@@ -8,7 +8,7 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6?logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![UI](https://img.shields.io/badge/UI-PySide6%20%2F%20Qt-41CD52?logo=qt&logoColor=white)](https://doc.qt.io/qtforpython/)
-[![Tests](https://img.shields.io/badge/tests-96%20passing-brightgreen)](#-tests)
+[![Tests](https://img.shields.io/badge/tests-102%20passing-brightgreen)](#-tests)
 [![Status](https://img.shields.io/badge/status-active-brightgreen)](#)
 
 </div>
@@ -138,7 +138,7 @@ amorceurs (`EOSBootstrapper`, `*Launcher`…) sont écartés.
 .venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-96 tests couvrent la logique non graphique : configuration, backend audio,
+102 tests couvrent la logique non graphique : configuration, backend audio,
 moteur de surveillance, découverte des jeux, journalisation, démarrage
 automatique.
 
@@ -162,7 +162,7 @@ WaveRouter/
 ├── main.py                       # Point d'entrée
 ├── lancer_waverouter.bat         # Lancement + installation auto des dépendances
 ├── requirements.txt
-├── tests/                        # 96 tests (logique non graphique)
+├── tests/                        # 102 tests (logique non graphique)
 └── waverouter/
     ├── config.py                 # Modèle + persistance JSON atomique
     ├── logger.py                 # Journalisation (fichier avec rotation + UI)
